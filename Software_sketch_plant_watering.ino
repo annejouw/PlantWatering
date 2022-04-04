@@ -1,5 +1,3 @@
-//Test change :)
-
 #include <Wire.h> //Used for the I2C protocol
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -10,6 +8,8 @@
 #include <ESP8266mDNS.h> //Used for OTA updates
 #include <WiFiUdp.h> //Used for OTA updates
 #include <ArduinoOTA.h> //Used for OTA updates
+#include <WiFiManager.h> // Used for managing WIFI https://github.com/tzapu/WiFiManager
+
 
 //OLED Display
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
@@ -29,21 +29,20 @@ Adafruit_BMP280 bmp;
 //LDR and soil moisture sensors
 int sensorPin = A0;
 int selectPin = D3;
-int selectedSensor = LOW; //LOW selects LDR, HIGH selects soil moisture sensor
+const int ldrSensor = LOW; //LOW selects LDR 
+const int soilSensor = HIGH; //HIGH selects soil moisture sensor
 int ldrValue = 0;
 int soilValue = 0;
+
+unsigned long messageDelay = 60000;
+unsigned long timeNow;
 
 //Servo
 Servo myservo;
 
 //Connecting to the WiFi and MQTT broker
-#ifndef STASSID
-#define STASSID "AndroidAP"
-#define STAPSK  "azsg5642"
-#endif
+WiFiManager wm;
 
-const char* ssid = STASSID;
-const char* password = STAPSK;
 const char* mqtt_server = "mqtt.uu.nl";
 const char* mqtt_id = "student053";
 const char* mqtt_password = "gH8YkBQN";
@@ -53,21 +52,25 @@ PubSubClient client(espClient);
 unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE  (50)
 char msg[MSG_BUFFER_SIZE];
-int value = 0;
+
+//General
+int devideMode = 0; //0 = automatic, 1 = manual
 
 //Setup device
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println("Booting");
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
-    delay(5000);
-    ESP.restart();
+  wm.setConfigPortalBlocking(true);
+  wm.setConfigPortalTimeout(180);
+  bool res = wm.autoConnect("AutoConnectAP");
+  if(!res){
+      Serial.println("Failed");
   }
-  randomSeed(micros()); //Initializes random seed
-
+  else {
+      Serial.println("Connected to the WIFI");
+  }
+  
   setupOTAupdates(); //Configures the system for OTA updates
   
   client.setServer(mqtt_server, 1883); //Sets the MQTT server
@@ -85,7 +88,7 @@ void setup() {
                   Adafruit_BMP280::FILTER_X16,      /* Filtering. */
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
   pinMode(selectPin, OUTPUT); //Selects LDR or soil moisture sensor
-  digitalWrite(selectPin, selectedSensor);
+  digitalWrite(selectPin, ldrSensor); //Selects the LDR sensor
   myservo.attach(2); //Attaches the servo on GIO2, which is D4 on the NodeMCU board
 }
 
@@ -94,25 +97,55 @@ void loop() {
   int temperature = bmp.readTemperature();
   int pressure = bmp.readPressure();
   ldrValue = analogRead(sensorPin);
-
+  readSoilMoisture();
+  timeNow = millis();
+  
   int pos = 0;
   myservo.write(pos);
   delay(15);
 
-  if (!client.connected()) {
-    reconnect();
+  if (!client.connected()) { //Check if client is connected to the MQTT broker, currently a blocking function
+    reconnect(); //If client is not connected, reconnect to the MQTT broker first
   }
   client.loop();
 
-  /*unsigned long now = millis();
-  if (now - lastMsg > 2000) {
-    lastMsg = now;
-    ++value;
-    snprintf (msg, MSG_BUFFER_SIZE, "hello world #%ld", value);
-    Serial.print("Publish message: ");
-    Serial.println(msg);
-    client.publish("infob3it/053/outTopic", msg);
-  }*/
+  
+  if (timeNow - lastMsg > messageDelay) {
+    lastMsg = timeNow;
+    publishSensor();
+  }
+
+  if (soilValue <= 200 && deviceMode == 0) {
+    waterPlant();
+  }
+}
+
+//Get sensor values
+int readSoilMoisture() {
+  digitalWrite(selectPin, soilSensor); //Select the Soil sensor
+  soilValue = analogRead(sensorPin);
+  digitalWrite(selectPin, ldrSensor); //Select the LDR sensor to prevent corrosion on the soil sensor
+}
+
+//Publish sensor values.
+void publishSensor() { //QoS must be 0 due to PubSubClient library, this is fine for frequent updates of sensor values. However, QoS 1 would have been more ideal in the case of the manual reading of sensor values, to make sure the values are sent at least once.
+    //Publish temperature
+    snprintf (msg, MSG_BUFFER_SIZE, "%ld", temperature);
+    client.publish("infob3it/053/temperature", msg);
+    //Publish pressure
+    snprintf (msg, MSG_BUFFER_SIZE, "%ld", pressure);
+    client.publish("infob3it/053/pressure", msg);
+    //Publish light level
+    snprintf (msg, MSG_BUFFER_SIZE, "%ld", ldrValue);
+    client.publish("infob3it/053/light", msg);
+    //Publish moisture level
+    snprintf (msg, MSG_BUFFER_SIZE, "%ld", soilValue);
+    client.publish("infob3it/053/soil", msg);
+}
+
+//Water the plant
+void waterPlant() {
+  
 }
 
 //OTA updates
@@ -173,14 +206,14 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("student_053", mqtt_id, mqtt_password)) {
+    if (client.connect("plantWateringApp", mqtt_id, mqtt_password, "infob3it/053/status", 0, true, "offline")) {
       Serial.println("connected");
-      // Once connected, publish an announcement...
-      client.publish("infob3it/053/outTopic", "hello world");
-      // ... and resubscribe
-      client.subscribe("infob3it/053/water"); //Sends the command to water the plant
-      client.subscribe("infob3it/053/read");  //Sends command to read sensor values
-      client.subscribe("infob3it/053/state"); //Automatic or manual mode
+      // Send online message
+      client.publish("infob3it/053/status", "online", true);
+      // Resubscribe
+      client.subscribe("infob3it/053/water", 0); //Sends the command to water the plant. 
+      client.subscribe("infob3it/053/read", 1);  //Sends command to read sensor values. QoS cannot be 0, as the command must be received at least once. Duplicate commands are not a problem as this will just send sensor values multiple times.
+      client.subscribe("infob3it/053/mode", 1); //Automatic or manual mode. QoS cannot be 0, as the mode must be changed. Duplicate messages are not a problem as this will just set the device mode to the same mode twice.
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -191,7 +224,7 @@ void reconnect() {
   }
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
+void callback(char* topic, byte* payload, unsigned int length) { //Do something with the arrived message
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
@@ -200,12 +233,22 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
   Serial.println();
 
-  // Switch on the LED if an 1 was received as first character
-  if ((char)payload[0] == '1') {
-    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is active low on the ESP-01)
-  } else {
-    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
+  if (topic == "infob3it/053/water") {
+    waterPlant();
+  }
+
+  if (topic == "infob3it/053/read") { //
+    publishSensor();
+  }
+
+  if (topic == "infob3it/053/state") { //Set the devide mode to manual (1) or automatic (0). 
+    if ((char)payload[0] == '1') {
+      deviceMode = 1;
+      Serial.println("Set to manual mode");
+    }
+    else {
+      deviceMode = 0;
+      Serial.println("Set to automatic mode");
+    }
   }
 }
