@@ -253,7 +253,7 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("plantWateringApp", mqtt_id, mqtt_password, "infob3it/053/status", 0, true, "offline")) {
+    if (client.connect("plantWateringApp", mqtt_id, mqtt_password, "infob3it/053/status", 2, true, "offline")) {
       Serial.println("connected");
       // Send online message
       client.publish("infob3it/053/status", "online", true);
